@@ -1,220 +1,172 @@
-## Overview
+# Architecture Documentation
 
-Build a production-ready data ingestion system that extracts event data from the DataSync Analytics API and stores it in a PostgreSQL database.
+## System Overview
 
-## Requirements
+The ingestion pipeline is designed as a fault-tolerant, restart-safe data extraction system that retrieves events from the DataSync Analytics API and persists them into PostgreSQL.
 
-Your solution must:
+The system prioritizes:
 
-1. Run entirely in Docker using the provided `docker-compose.yml`
-2. Work with the command: `sh run-ingestion.sh`
-**Tools Policy:**
-- **Allowed:** Any AI coding tools or development tools during development
-- **Solution constraint:** Your final solution must run entirely in Docker without requiring external API keys or 3rd party services
+✔ Reliability
+✔ Resumability
+✔ Throughput efficiency
+✔ Failure recovery
 
+---
 
-If you use AI tools, please document which ones and how they helped in your solution's README.
+## High Level Architecture
 
-## The Challenge
+### Core Components
 
-DataSync Analytics is a live application with:
-- **Dashboard:** http://datasync-dev-alb-101078500.us-east-1.elb.amazonaws.com (explore the UI!)
-- **API:** http://datasync-dev-alb-101078500.us-east-1.elb.amazonaws.com/api/v1
+1. Ingestion Service (Node.js + TypeScript)
+   Responsible for API communication, pagination, retries, rate-limit handling, and persistence.
 
-Your task is to:
+2. PostgreSQL Database
+   Durable storage for events and ingestion state.
 
-1. **Connect** to the DataSync API
-2. **Extract** ALL events from the system (3,000,000)
-3. **Handle** the API's pagination correctly
-4. **Respect** rate limits
-5. **Store** data in PostgreSQL
-7. **Make it resumable** (save progress, resume after failure)
+3. Ingestion State Table
+   Tracks pipeline progress and recovery metadata.
 
-### Important Notes
+---
 
-- The API documentation is minimal by design
-- Part of this challenge is **discovering** how the API works
-- Pay attention to response headers and data formats
-- The API has behaviors that aren't documented
-- Timestamp formats may vary across responses - normalize carefully
+## Data Flow
 
-## Getting Started
+The ingestion loop follows a deterministic pipeline:
 
-### Prerequisites
+API Request → Pagination → Rate-Limit Adaptation → Retry Handling → Idempotent Insert → Checkpoint Save
 
-- Docker and Docker Compose
-- Node.js 20+
-- npm or yarn
+Each stage is designed to tolerate transient failures without data loss.
 
-### Your Workspace
+---
 
-Use this directory as your workspace. A `docker-compose.yml` is provided with PostgreSQL for your solution.
+## Persistence Strategy
 
-```bash
-docker compose up -d
-```
+### Events Table
 
-This gives you:
-- PostgreSQL at `localhost:5434`
+All events are stored with:
 
-### Exploring the Application
+✔ Primary key on id
+✔ JSONB payload storage
+✔ Normalized timestamp fields
 
-**Dashboard:** http://datasync-dev-alb-101078500.us-east-1.elb.amazonaws.com
-- Browse the dashboard to understand the data model
-- Curious developers explore everything...
+To guarantee safe reprocessing:
 
-**API Base URL:** `http://datasync-dev-alb-101078500.us-east-1.elb.amazonaws.com/api/v1`
+ON CONFLICT (id) DO NOTHING
 
-**API Key:** You should have received a unique API key from your interviewer.
+This ensures idempotency and replay safety.
 
-> **Important:** Your API key is valid for **3 hours from first use**. The timer starts when you make your first API call. Plan your work accordingly.
+---
 
-**API Documentation:** http://datasync-dev-alb-101078500.us-east-1.elb.amazonaws.com/docs/api.md
+### Ingestion State Table
 
-## Requirements
+Tracks pipeline progress using:
 
-### Must Have
+• Cursor
+• Ingested count
+• Last processed event ID
+• Updated timestamp
 
-1. **TypeScript** codebase
-2. **PostgreSQL** for data storage
-3. **Docker Compose** for running your solution
-4. **Proper error handling** and logging
-5. **Rate limit handling** - respect the API limits
-6. **Resumable ingestion** - if the process crashes, it should resume from where it left off
+This enables crash recovery and resumable execution.
 
-### Should Have
+---
 
-1. **Throughput optimization** - maximize events per second
-2. **Progress tracking** - show ingestion progress
-3. **Health checks** - monitor worker health
+## Resilience Mechanisms
 
-### Nice to Have
+### Cursor Expiry Handling
 
-1. **Unit tests**
-2. **Integration tests**
-3. **Metrics/monitoring**
-4. **Architecture documentation**
+Observed behavior:
 
-## Submitting Your Results
+✔ Cursors expire (~116 seconds)
+✔ Expired cursors return HTTP 400
 
-Once you've ingested all events, submit your results to verify completion.
+Recovery strategy:
 
-### Step 1: Push Your Solution to GitHub
+✔ Reset cursor
+✔ Restart ingestion safely
+✔ Enable catch-up optimization
 
-Before submitting, push your solution to a GitHub repository. This allows us to review your code and see your commit history/progress.
+---
 
-### Step 2: Submit via API
+### Retry Strategy
 
-**POST** `http://datasync-dev-alb-101078500.us-east-1.elb.amazonaws.com/api/v1/submissions`
+Transient failures handled:
 
-Submit a file containing all event IDs (one per line) along with your GitHub repo URL.
+✔ Gateway timeouts (504)
+✔ Network failures
+✔ Server errors (5xx)
 
-**Headers:**
-- `X-API-Key`: Your API key
-- `Content-Type`: `text/plain` or `application/json`
+Mitigation:
 
-**Option 1: Plain text with query param (recommended)**
-```bash
-curl -X POST \
-  -H "X-API-Key: YOUR_API_KEY" \
-  -H "Content-Type: text/plain" \
-  --data-binary @event_ids.txt \
-  "http://datasync-dev-alb-101078500.us-east-1.elb.amazonaws.com/api/v1/submissions?github_repo=https://github.com/yourusername/your-repo"
-```
+✔ Exponential backoff
+✔ Bounded retry attempts
+✔ No ingestion interruption
 
-**Option 2: JSON**
-```bash
-curl -X POST \
-  -H "X-API-Key: YOUR_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "ids": "id1\nid2\nid3",
-    "githubRepoUrl": "https://github.com/yourusername/your-repo"
-  }' \
-  http://datasync-dev-alb-101078500.us-east-1.elb.amazonaws.com/api/v1/submissions
-```
+---
 
-**Response:**
-```json
-{
-  "success": true,
-  "data": {
-    "submissionId": "uuid",
-    "eventCount": 3000000,
-    "githubRepoUrl": "https://github.com/yourusername/your-repo",
-    "submittedAt": "2024-01-15T10:30:00.000Z",
-    "timeToSubmit": {
-      "ms": 1234567,
-      "seconds": 1235,
-      "minutes": 20.6,
-      "formatted": "20m 35s"
-    },
-    "submissionNumber": 1,
-    "remainingSubmissions": 4
-  },
-  "message": "Submission #1 received with 3,000,000 event IDs. 4 submissions remaining."
-}
-```
+### Replay / Duplicate Detection
 
-**Limits:**
-- Maximum **5 submissions** per API key
-- The response includes your completion time (from first API call to submission)
+Observed behavior:
 
-**Check your submissions:**
-```bash
-curl -H "X-API-Key: YOUR_API_KEY" \
-  http://datasync-dev-alb-101078500.us-east-1.elb.amazonaws.com/api/v1/submissions
-```
+✔ API occasionally returns duplicate windows
 
-## Important: Verification Testing
+Detection:
 
-**Your solution will be tested after submission to verify it works correctly.**
+✔ inserted === 0
 
-- The full ingestion must work when running `sh run-ingestion.sh` from scratch on a clean Linux machine using Docker
-- We will run your solution on a fresh environment with only Docker installed
-- The following do NOT count as valid solutions:
-  - WIP/incomplete code that requires manual intervention
-  - Solutions that require manual pauses or human interaction during execution
-  - Code that needs to be modified after starting the ingestion
-  - Solutions that only work after multiple manual restarts
+Mitigation:
 
-Your solution must be fully automated and complete the entire ingestion without any manual steps.
+✔ Automatic catch-up mode
+✔ Skip redundant DB work
+✔ Resume normal ingestion on new data
 
-## What to Submit
+---
 
-Your solution should include:
+## Catch-Up Mode Optimization
 
-1. All source code in the `packages/` directory
-2. Updated `docker-compose.yml` if needed
-3. `README.md` with:
-   - How to run your solution
-   - Architecture overview
-   - Any discoveries about the API
-   - What you would improve with more time
+When replay scenarios are detected:
 
-## Evaluation Criteria
+✔ Inserts temporarily bypassed
+✔ Pipeline fast-forwards through duplicates
+✔ Normal ingestion resumes once new rows detected
 
-| Category | Weight |
-|----------|--------|
-| API Discovery & Throughput | 60% |
-| Job Processing Architecture | 40% |
+This prevents wasted DB overhead during cursor resets.
 
-**Your score is primarily based on throughput** - how many events per minute can your solution ingest?
+---
 
-> **Challenge yourself:** Top candidates have solved this entire challenge - including ingesting all 3M events - in under 30 minutes. If you feel limited by the API, keep pushing. There's always a faster way.
+## Rate-Limit Adaptation
 
-## Tips
+Instead of static delays, request pacing dynamically adjusts using:
 
-- Start by exploring the API thoroughly - this is critical
-- Make requests, look at responses, **check headers carefully**
-- The documented API may not be the fastest way...
-- Think about failure scenarios - what happens if the process crashes mid-ingestion?
-- Consider how to **maximize throughput** while respecting rate limits
-- Good engineers explore every corner of an application
-- Cursors have a lifecycle - don't let them get stale
+• x-ratelimit-remaining
+• x-ratelimit-reset
 
-## Questions?
+This maximizes throughput while avoiding throttling errors.
 
-If something is unclear about the requirements (not the API!), please reach out to your contact.
+---
 
-Good luck!
+## Failure Recovery Guarantees
+
+The system guarantees:
+
+✔ No duplicate corruption
+✔ No data loss on restart
+✔ Safe cursor recovery
+✔ Continued ingestion after transient failures
+
+---
+
+## Scalability Considerations
+
+While the API rate limit defines the upper throughput bound, the system is designed to scale via:
+
+• Bulk insert optimizations (COPY)
+• Parallel ingestion (if API permits partitioning)
+• Backpressure-aware batching
+
+---
+
+## Design Philosophy
+
+The architecture emphasizes real-world ingestion robustness, acknowledging that APIs often exhibit:
+
+✔ Unstable cursors
+✔ Expiring paginat
