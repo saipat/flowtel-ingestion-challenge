@@ -155,7 +155,15 @@ export async function runIngestion() {
       break;
     }
 
-    if (!json.pagination?.hasMore) {
+    const hasMore = json.pagination?.hasMore;
+    const total = json.meta?.total;
+
+    // If API omits hasMore sometimes, keep going as long as we have a cursor or meta.total says there’s more.
+    const shouldContinue =
+      hasMore === true ||
+      (hasMore == null && (!!json.pagination?.nextCursor || (typeof total === "number" && ingestedCount < total)));
+
+    if (!shouldContinue) {
       console.log("Done. Total ingested:", ingestedCount);
       break;
     }
